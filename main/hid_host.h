@@ -7,7 +7,6 @@
 #include "usb/hid_usage_keyboard.h"
 #include "usb/hid_usage_mouse.h"
 #include "usb/usb_host.h"
-
 /**
  * @brief APP event group
  *
@@ -17,10 +16,7 @@
  * press event (Generally, it is IO0). APP_EVENT_HID_HOST   - HID Host Driver
  * event, such as device connection/disconnection or input report.
  */
-typedef enum {
-    APP_EVENT = 0,
-    APP_EVENT_HID_HOST
-} app_event_group_t;
+typedef enum { APP_EVENT = 0, APP_EVENT_HID_HOST } app_event_group_t;
 
 /**
  * @brief APP event queue
@@ -33,14 +29,16 @@ typedef struct {
     /* HID Host - Device related info */
     struct {
         hid_host_device_handle_t handle;
-        hid_host_driver_event_t  event;
-        void*                    arg;
+        hid_host_driver_event_t event;
+        void* arg;
     } hid_host_device;
 } hid_event_queue_t;
 
-void               hid_host_init( void );
-void               hid_host_device_event( hid_event_queue_t* evt );
-QueueHandle_t      get_queue_handle( void );
-hid_event_queue_t* get_event_queue( void );
+void hid_host_init(void);
+void hid_host_device_event(hid_event_queue_t* evt);
+QueueHandle_t get_queue_handle(void);
+hid_event_queue_t* get_event_queue(void);
+
+extern hid_host_dev_info_t hid_host_info;
 
 #endif /* __HID_HOST_H__ */
