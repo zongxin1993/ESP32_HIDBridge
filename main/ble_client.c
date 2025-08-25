@@ -1,10 +1,13 @@
 #include "ble_client.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -22,6 +25,7 @@
 #define REMOTE_SERVICE_UUID ESP_GATT_UUID_HID_SVC
 #define KEYWORD_CHAR_UUID 0xFF01
 #define SENSOR_CHAR_UUID 0xFF02
+#define VIAL_CHAR_UUID 0xFF03
 #define PROFILE_NUM 1
 #define PROFILE_HID_APP_ID 0
 #define INVALID_HANDLE 0
@@ -60,6 +64,7 @@ typedef struct {
     uint16_t service_end_handle;
     uint16_t keyword_char_handle;
     uint16_t info_char_handle;
+    uint16_t vial_char_handle;
     esp_bd_addr_t remote_bda;
     esp_gattc_cb_t gattc_cb;
 } gattc_profile_inst_t;
@@ -78,7 +83,7 @@ static gattc_profile_inst_t gl_profile_tab[PROFILE_NUM] = {
         },
 };
 
-void ble_send_char(uint8_t* data, size_t data_length) {
+void ble_send_keyword(uint8_t* data, size_t data_length) {
     if (is_connect && is_send_info) {
         ESP_ERROR_CHECK(esp_ble_gattc_write_char(GATTC_PROFILE_HID.gattc_if, GATTC_PROFILE_HID.conn_id,
                                                  GATTC_PROFILE_HID.keyword_char_handle, data_length, data,
@@ -160,47 +165,32 @@ static char* esp_auth_req_to_str(esp_ble_auth_req_t auth_req) {
     return auth_str;
 }
 
-void send_sensor_info() {
+void ble_send_sensor_info() {
     if (is_connect) {
-        uint8_t ble_buffer[HID_STR_DESC_MAX_LENGTH * 2];
-        uint16_t pos = 0;
+        // usb_device_info_t device_info_tmp = hid_host_info.device_info;
+        const usb_device_desc_t* device_desc_p = hid_host_info.device_desc;
+        const usb_config_desc_t* config_desc_p = hid_host_info.config_desc;
 
-        ble_buffer[pos++] = (hid_host_info.VID & 0xFF);       // 低8位
-        ble_buffer[pos++] = (hid_host_info.VID >> 8) & 0xFF;  // 高8位
-
-        ble_buffer[pos++] = (hid_host_info.PID & 0xFF);
-        ble_buffer[pos++] = (hid_host_info.PID >> 8) & 0xFF;
-
-        for (int i = 0; i < HID_STR_DESC_MAX_LENGTH; i++) {
-            if (hid_host_info.iManufacturer[i] == L'\0') {
-                ble_buffer[pos++] = '\0';
-                ble_buffer[pos++] = '\0';
-                break;
-            } else {
-                ble_buffer[pos++] = (hid_host_info.iManufacturer[i] & 0xFF);       // 宽字符低8位
-                ble_buffer[pos++] = (hid_host_info.iManufacturer[i] >> 8) & 0xFF;  // 宽字符高8位
-            }
-        }
-
-        for (int i = 0; i < HID_STR_DESC_MAX_LENGTH; i++) {
-            if (hid_host_info.iManufacturer[i] == L'\0') {
-                ble_buffer[pos++] = '\0';
-                ble_buffer[pos++] = '\0';
-                break;
-            } else {
-                ble_buffer[pos++] = (hid_host_info.iProduct[i] & 0xFF);
-                ble_buffer[pos++] = (hid_host_info.iProduct[i] >> 8) & 0xFF;
-            }
-        }
-
-        for (int i = 0; i < HID_STR_DESC_MAX_LENGTH - 1; i++) {
-            ble_buffer[pos++] = (hid_host_info.iSerialNumber[i] & 0xFF);
-            ble_buffer[pos++] = (hid_host_info.iSerialNumber[i] >> 8) & 0xFF;
-        }
+        uint8_t* send_buffer = malloc(config_desc_p->wTotalLength + USB_DEVICE_DESC_SIZE);
+        memcpy(send_buffer, device_desc_p, USB_DEVICE_DESC_SIZE);
+        memcpy(send_buffer + USB_DEVICE_DESC_SIZE, config_desc_p, config_desc_p->wTotalLength);
 
         ESP_ERROR_CHECK(esp_ble_gattc_write_char_descr(GATTC_PROFILE_HID.gattc_if, GATTC_PROFILE_HID.conn_id,
-                                                       GATTC_PROFILE_HID.info_char_handle, pos, ble_buffer,
-                                                       ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE));
+                                                       GATTC_PROFILE_HID.info_char_handle,
+                                                       config_desc_p->wTotalLength + USB_DEVICE_DESC_SIZE, send_buffer,
+                                                       ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE));
+        is_send_info = true;
+        free(send_buffer);
+    } else {
+        ESP_LOGE(GATTC_TAG, "not connect");
+    }
+}
+
+void ble_send_vial_data(uint8_t* data, size_t data_length) {
+    if (is_connect && is_send_info) {
+        ESP_ERROR_CHECK(esp_ble_gattc_write_char(GATTC_PROFILE_HID.gattc_if, GATTC_PROFILE_HID.conn_id,
+                                                 GATTC_PROFILE_HID.vial_char_handle, data_length, data,
+                                                 ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE));
     } else {
         ESP_LOGE(GATTC_TAG, "not connect");
     }
@@ -209,7 +199,6 @@ void send_sensor_info() {
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if,
                                         esp_ble_gattc_cb_param_t* param) {
     esp_ble_gattc_cb_param_t* p_data = (esp_ble_gattc_cb_param_t*)param;
-
     switch (event) {
         case ESP_GATTC_REG_EVT:
             ESP_LOGD(GATTC_TAG, "GATT client register, status %u, app_id %u, gattc_if %d", p_data->reg.status,
@@ -305,6 +294,12 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
                                     GATTC_PROFILE_HID.info_char_handle = char_elem_result[i].char_handle;
                                     esp_ble_gattc_register_for_notify(gattc_if, GATTC_PROFILE_HID.remote_bda,
                                                                       char_elem_result[i].char_handle);
+                                } else if (char_elem_result[i].uuid.len == ESP_UUID_LEN_16 &&
+                                           char_elem_result[i].uuid.uuid.uuid16 == VIAL_CHAR_UUID &&
+                                           (char_elem_result[i].properties & ESP_GATT_CHAR_PROP_BIT_NOTIFY)) {
+                                    GATTC_PROFILE_HID.vial_char_handle = char_elem_result[i].char_handle;
+                                    esp_ble_gattc_register_for_notify(gattc_if, GATTC_PROFILE_HID.remote_bda,
+                                                                      char_elem_result[i].char_handle);
                                 }
                             }
                         }
@@ -321,12 +316,22 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
             } else {
                 ESP_LOGD(GATTC_TAG, "Notification register successfully");
             }
-            if (GATTC_PROFILE_HID.info_char_handle == p_data->reg_for_notify.handle) send_sensor_info();
+            if (GATTC_PROFILE_HID.info_char_handle == p_data->reg_for_notify.handle) {
+                ble_send_sensor_info();
+            }
             break;
         }
         case ESP_GATTC_NOTIFY_EVT:
-            ESP_LOGD(GATTC_TAG, "Notification received, value ");
-            ESP_LOG_BUFFER_HEX(GATTC_TAG, p_data->notify.value, p_data->notify.value_len);
+            ESP_LOGI(GATTC_TAG, "Notification received, value len %d", p_data->notify.value_len);
+            // ESP_LOG_BUFFER_HEX(GATTC_TAG, p_data->notify.value, p_data->notify.value_len);
+            if (p_data->notify.handle == GATTC_PROFILE_HID.vial_char_handle) {
+                if (p_data->notify.value[1] == HID_REPORT_TYPE_OUTPUT) {
+                    hid_class_request_set_report(hid_device_handle, HID_REPORT_TYPE_OUTPUT,
+                                                         0, p_data->notify.value,
+                                                         p_data->notify.value_len);
+                    ESP_LOG_BUFFER_HEX(GATTC_TAG, p_data->notify.value, p_data->notify.value_len);
+                    }
+            }
             break;
         case ESP_GATTC_WRITE_DESCR_EVT:
             if (p_data->write.status != ESP_GATT_OK) {
@@ -338,7 +343,7 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         case ESP_GATTC_SRVC_CHG_EVT: {
             esp_bd_addr_t bda;
             memcpy(bda, p_data->srvc_chg.remote_bda, sizeof(esp_bd_addr_t));
-            ESP_LOGD(GATTC_TAG, "Service change from " ESP_BD_ADDR_STR "", ESP_BD_ADDR_HEX(bda));
+            ESP_LOGI(GATTC_TAG, "Service change from " ESP_BD_ADDR_STR "", ESP_BD_ADDR_HEX(bda));
             break;
         }
         case ESP_GATTC_WRITE_CHAR_EVT:

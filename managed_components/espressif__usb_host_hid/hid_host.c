@@ -10,8 +10,10 @@
 #include <string.h>
 #include <sys/queue.h>
 #include <sys/param.h>
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "esp_log_level.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -710,6 +712,9 @@ static void ctrl_xfer_done(usb_transfer_t *ctrl_xfer)
 {
     assert(ctrl_xfer);
     hid_device_t *hid_device = (hid_device_t *)ctrl_xfer->context;
+    ESP_LOGI(TAG, "713 Control Transfer Status: %d", ctrl_xfer->status);
+    ESP_LOG_BUFFER_HEX("zong", ctrl_xfer->data_buffer, ctrl_xfer->actual_num_bytes);
+
     xSemaphoreGive(hid_device->ctrl_xfer_done);
 }
 
@@ -739,9 +744,11 @@ static esp_err_t hid_control_transfer(hid_device_t *hid_device,
     ctrl_xfer->bEndpointAddress = 0;
     ctrl_xfer->timeout_ms = timeout_ms;
     ctrl_xfer->num_bytes = len;
-
-    HID_RETURN_ON_ERROR( usb_host_transfer_submit_control(s_hid_driver->client_handle, ctrl_xfer),
-                         "Unable to submit control transfer");
+    ESP_LOG_BUFFER_HEXDUMP(TAG, ctrl_xfer->data_buffer, ctrl_xfer->actual_num_bytes, ESP_LOG_DEBUG);
+    // HID_RETURN_ON_ERROR( usb_host_transfer_submit_control(s_hid_driver->client_handle, ctrl_xfer),
+    //                      "Unable to submit control transfer");
+    esp_err_t ret = usb_host_transfer_submit_control(s_hid_driver->client_handle, ctrl_xfer);
+    ESP_LOGI("zong", "usb_host_transfer_submit_control ret:%d",ret);
 
     BaseType_t received = xSemaphoreTake(hid_device->ctrl_xfer_done, pdMS_TO_TICKS(ctrl_xfer->timeout_ms));
 
@@ -756,7 +763,45 @@ static esp_err_t hid_control_transfer(hid_device_t *hid_device,
         usb_host_endpoint_clear(hid_device->dev_hdl, ctrl_xfer->bEndpointAddress);
         return ESP_ERR_TIMEOUT;
     }
+    ESP_LOGI("zong 762", "Control Transfer Status: %d", ctrl_xfer->status);
+    ESP_LOG_BUFFER_HEXDUMP(TAG, ctrl_xfer->data_buffer, ctrl_xfer->actual_num_bytes, ESP_LOG_DEBUG);
 
+    return ESP_OK;
+}
+
+static esp_err_t hid_control_transfer_zong(hid_device_t *hid_device,
+                                      size_t len,
+                                      uint32_t timeout_ms)
+{
+
+    usb_transfer_t *ctrl_xfer = hid_device->ctrl_xfer;
+
+    ctrl_xfer->device_handle = hid_device->dev_hdl;
+    ctrl_xfer->callback = ctrl_xfer_done;
+    ctrl_xfer->context = hid_device;
+    ctrl_xfer->bEndpointAddress = 0;
+    ctrl_xfer->timeout_ms = timeout_ms;
+    ctrl_xfer->num_bytes = len;
+    ESP_LOG_BUFFER_HEXDUMP(TAG, ctrl_xfer->data_buffer, ctrl_xfer->actual_num_bytes, ESP_LOG_DEBUG);
+    // HID_RETURN_ON_ERROR( usb_host_transfer_submit_control(s_hid_driver->client_handle, ctrl_xfer),
+    //                      "Unable to submit control transfer");
+    esp_err_t ret = usb_host_transfer_submit_control(s_hid_driver->client_handle, ctrl_xfer);
+    ESP_LOGI("zong", "usb_host_transfer_submit_control ret:%d",ret);
+
+    BaseType_t received = xSemaphoreTake(hid_device->ctrl_xfer_done, pdMS_TO_TICKS(ctrl_xfer->timeout_ms));
+
+    if (received != pdTRUE) {
+        // Transfer was not finished, error in USB LIB. Reset the endpoint
+        ESP_LOGE(TAG, "Control Transfer Timeout");
+
+        HID_RETURN_ON_ERROR( usb_host_endpoint_halt(hid_device->dev_hdl, ctrl_xfer->bEndpointAddress),
+                             "Unable to HALT EP");
+        HID_RETURN_ON_ERROR( usb_host_endpoint_flush(hid_device->dev_hdl, ctrl_xfer->bEndpointAddress),
+                             "Unable to FLUSH EP");
+        usb_host_endpoint_clear(hid_device->dev_hdl, ctrl_xfer->bEndpointAddress);
+        return ESP_ERR_TIMEOUT;
+    }
+    ESP_LOGI("zong 762", "Control Transfer Status: %d", ctrl_xfer->status);
     ESP_LOG_BUFFER_HEXDUMP(TAG, ctrl_xfer->data_buffer, ctrl_xfer->actual_num_bytes, ESP_LOG_DEBUG);
 
     return ESP_OK;
@@ -884,12 +929,47 @@ static esp_err_t hid_class_request_set(hid_device_t *hid_device,
     setup->wValue = req->wValue;
     setup->wIndex = req->wIndex;
     setup->wLength = req->wLength;
-
+    ESP_LOGI(TAG, "hid_class_request_set: bRequest: 0x%02x, wValue: 0x%04x, wIndex: 0x%04x, wLength: 0x%04x",
+             req->bRequest, req->wValue, req->wIndex, req->wLength);
     if (req->wLength && req->data) {
         memcpy(ctrl_xfer->data_buffer + USB_SETUP_PACKET_SIZE, req->data, req->wLength);
     }
 
     ret = hid_control_transfer(hid_device,
+                               USB_SETUP_PACKET_SIZE + setup->wLength,
+                               DEFAULT_TIMEOUT_MS);
+
+    hid_device_unlock(hid_device);
+
+    return ret;
+}
+
+static esp_err_t hid_class_request_set_zong(hid_device_t *hid_device,
+                                       const hid_class_request_t *req)
+{
+    esp_err_t ret;
+    usb_transfer_t *ctrl_xfer = hid_device->ctrl_xfer;
+    HID_RETURN_ON_INVALID_ARG(hid_device);
+    HID_RETURN_ON_INVALID_ARG(hid_device->ctrl_xfer);
+
+    HID_RETURN_ON_ERROR( hid_device_try_lock(hid_device, DEFAULT_TIMEOUT_MS),
+                         "HID Device is busy by other task");
+
+    usb_setup_packet_t *setup = (usb_setup_packet_t *)ctrl_xfer->data_buffer;
+    setup->bmRequestType = USB_BM_REQUEST_TYPE_DIR_OUT |
+                           USB_BM_REQUEST_TYPE_TYPE_CLASS |
+                           USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
+    setup->bRequest = req->bRequest;
+    setup->wValue = req->wValue;
+    setup->wIndex = req->wIndex;
+    setup->wLength = req->wLength;
+    ESP_LOGI(TAG, "hid_class_request_set: bRequest: 0x%02x, wValue: 0x%04x, wIndex: 0x%04x, wLength: 0x%04x",
+             req->bRequest, req->wValue, req->wIndex, req->wLength);
+    if (req->wLength && req->data) {
+        memcpy(ctrl_xfer->data_buffer + USB_SETUP_PACKET_SIZE, req->data, req->wLength);
+    }
+
+    ret = hid_control_transfer_zong(hid_device,
                                USB_SETUP_PACKET_SIZE + setup->wLength,
                                DEFAULT_TIMEOUT_MS);
 
@@ -924,7 +1004,9 @@ static esp_err_t hid_class_request_get(hid_device_t *hid_device,
     setup->bmRequestType = USB_BM_REQUEST_TYPE_DIR_IN |
                            USB_BM_REQUEST_TYPE_TYPE_CLASS |
                            USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
+    ESP_LOGI("zong", "bRequest: 0x%02x", req->bRequest);
     setup->bRequest = req->bRequest;
+    ESP_LOGI("zong", "wValue: 0x%04x, wIndex: 0x%04x, wLength: 0x%04x", req->wValue, req->wIndex, req->wLength);
     setup->wValue = req->wValue;
     setup->wIndex = req->wIndex;
     setup->wLength = req->wLength;
@@ -943,6 +1025,7 @@ static esp_err_t hid_class_request_get(hid_device_t *hid_device,
             if (out_length) {
                 *out_length = ctrl_xfer->actual_num_bytes;
             }
+            ESP_LOGI("zong", "out_length: %d",out_length );
         } else {
             ret = ESP_ERR_INVALID_SIZE;
         }
@@ -952,6 +1035,58 @@ static esp_err_t hid_class_request_get(hid_device_t *hid_device,
 
     return ret;
 }
+
+
+static esp_err_t hid_class_request_get_zong(hid_device_t *hid_device,
+                                       const hid_class_request_t *req,
+                                       size_t *out_length)
+{
+    esp_err_t ret;
+    HID_RETURN_ON_INVALID_ARG(hid_device);
+    HID_RETURN_ON_INVALID_ARG(hid_device->ctrl_xfer);
+
+    usb_transfer_t *ctrl_xfer = hid_device->ctrl_xfer;
+
+    HID_RETURN_ON_ERROR( hid_device_try_lock(hid_device, DEFAULT_TIMEOUT_MS),
+                         "HID Device is busy by other task");
+
+    usb_setup_packet_t *setup = (usb_setup_packet_t *)ctrl_xfer->data_buffer;
+
+    setup->bmRequestType = USB_BM_REQUEST_TYPE_DIR_IN |
+                           USB_BM_REQUEST_TYPE_TYPE_CLASS |
+                           USB_BM_REQUEST_TYPE_RECIP_INTERFACE;
+    ESP_LOGI("zong", "bRequest: 0x%02x", req->bRequest);
+    setup->bRequest = req->bRequest;
+    ESP_LOGI("zong", "wValue: 0x%04x, wIndex: 0x%04x, wLength: 0x%04x", req->wValue, req->wIndex, req->wLength);
+    setup->wValue = req->wValue;
+    setup->wIndex = req->wIndex;
+    setup->wLength = req->wLength;
+
+    ret = hid_control_transfer_zong(hid_device,
+                               USB_SETUP_PACKET_SIZE + setup->wLength,
+                               DEFAULT_TIMEOUT_MS);
+
+    if (ESP_OK == ret) {
+        // We do not need the setup data, which is still in the transfer data buffer
+        ctrl_xfer->actual_num_bytes -= USB_SETUP_PACKET_SIZE;
+        // Copy data if the size is ok
+        if (ctrl_xfer->actual_num_bytes <= req->wLength) {
+            memcpy(req->data, ctrl_xfer->data_buffer + USB_SETUP_PACKET_SIZE, ctrl_xfer->actual_num_bytes);
+            // return actual num bytes of response
+            if (out_length) {
+                *out_length = ctrl_xfer->actual_num_bytes;
+            }
+            ESP_LOGI("zong", "out_length: %d",out_length );
+        } else {
+            ret = ESP_ERR_INVALID_SIZE;
+        }
+    }
+
+    hid_device_unlock(hid_device);
+
+    return ret;
+}
+
 
 // ---------------------------- Private ---------------------------------------
 static esp_err_t hid_host_string_descriptor_copy(wchar_t *dest,
@@ -1259,6 +1394,7 @@ esp_err_t hid_host_device_get_params(hid_host_device_handle_t hid_dev_handle,
                                      hid_host_dev_params_t *dev_params)
 {
     hid_iface_t *iface = get_iface_by_handle(hid_dev_handle);
+    ESP_LOGI(TAG, "HID Host Get Device Parameters");
 
     HID_RETURN_ON_FALSE(iface,
                         ESP_ERR_INVALID_STATE,
@@ -1344,6 +1480,7 @@ uint8_t *hid_host_get_report_descriptor(hid_host_device_handle_t hid_dev_handle,
                                         size_t *report_desc_len)
 {
     hid_iface_t *iface = get_iface_by_handle(hid_dev_handle);
+    ESP_LOGI(TAG, "HID Host Get Report Descriptor");
 
     if (NULL == iface) {
         return NULL;
@@ -1375,22 +1512,24 @@ esp_err_t hid_host_get_device_info(hid_host_device_handle_t hid_dev_handle,
     hid_device_t *hid_dev = iface->parent;
 
     // Fill descriptor device information
-    const usb_device_desc_t *desc;
-    usb_device_info_t dev_info;
-    HID_RETURN_ON_ERROR( usb_host_get_device_descriptor(hid_dev->dev_hdl, &desc),
+    // const usb_device_desc_t *desc;
+    // usb_device_info_t dev_info;
+    HID_RETURN_ON_ERROR( usb_host_get_device_descriptor(hid_dev->dev_hdl, &hid_dev_info->device_desc),
                          "Unable to get device descriptor");
-    HID_RETURN_ON_ERROR( usb_host_device_info(hid_dev->dev_hdl, &dev_info),
+    HID_RETURN_ON_ERROR( usb_host_device_info(hid_dev->dev_hdl, &hid_dev_info->device_info),
                          "Unable to get USB device info");
     // VID, PID
-    hid_dev_info->VID = desc->idVendor;
-    hid_dev_info->PID = desc->idProduct;
+    hid_dev_info->VID = hid_dev_info->device_desc->idVendor;
+    hid_dev_info->PID = hid_dev_info->device_desc->idProduct;
     // Strings
     hid_host_string_descriptor_copy(hid_dev_info->iManufacturer,
-                                    dev_info.str_desc_manufacturer);
+                                    hid_dev_info->device_info.str_desc_manufacturer);
     hid_host_string_descriptor_copy(hid_dev_info->iProduct,
-                                    dev_info.str_desc_product);
+                                    hid_dev_info->device_info.str_desc_product);
     hid_host_string_descriptor_copy(hid_dev_info->iSerialNumber,
-                                    dev_info.str_desc_serial_num);
+                                    hid_dev_info->device_info.str_desc_serial_num);
+
+    ESP_ERROR_CHECK(usb_host_get_active_config_descriptor(hid_dev->dev_hdl, &hid_dev_info->config_desc));
     return ESP_OK;
 }
 
@@ -1401,7 +1540,7 @@ esp_err_t hid_class_request_get_report(hid_host_device_handle_t hid_dev_handle,
                                        size_t *report_length)
 {
     hid_iface_t *iface = get_iface_by_handle(hid_dev_handle);
-
+    ESP_LOGI(TAG, "HID Class Request Get Report");
     HID_RETURN_ON_INVALID_ARG(iface);
     HID_RETURN_ON_INVALID_ARG(report);
 
@@ -1413,6 +1552,31 @@ esp_err_t hid_class_request_get_report(hid_host_device_handle_t hid_dev_handle,
         .data = report
     };
 
+    return hid_class_request_get(iface->parent, &get_report, report_length);
+}
+
+esp_err_t hid_class_request_get_report_instance(hid_host_device_handle_t hid_dev_handle,
+                                       uint8_t report_type,
+                                       uint8_t report_id,
+                                       uint8_t *report,
+                                       size_t *report_length,
+                                       uint8_t report_instance)
+{
+    hid_iface_t *iface = get_iface_by_handle(hid_dev_handle);
+    ESP_LOGI(TAG, "HID Class Request Get Report");
+    HID_RETURN_ON_INVALID_ARG(iface);
+    HID_RETURN_ON_INVALID_ARG(report);
+
+    const hid_class_request_t get_report = {
+        .bRequest = HID_CLASS_SPECIFIC_REQ_GET_REPORT,
+        .wValue = (report_type << 8) | report_id,
+        .wIndex = report_instance,
+        .wLength = *report_length,
+        .data = report
+    };
+    if (report_instance) {
+        return hid_class_request_get_zong(iface->parent, &get_report, report_length);
+    }
     return hid_class_request_get(iface->parent, &get_report, report_length);
 }
 
@@ -1434,7 +1598,7 @@ esp_err_t hid_class_request_get_idle(hid_host_device_handle_t hid_dev_handle,
         .wLength = 1,
         .data = tmp
     };
-
+    ESP_LOGI(TAG, "HID Class Request Get Idle");
     HID_RETURN_ON_ERROR( hid_class_request_get(iface->parent, &get_idle, NULL),
                          "HID class request transfer failure");
 
@@ -1460,7 +1624,7 @@ esp_err_t hid_class_request_get_protocol(hid_host_device_handle_t hid_dev_handle
         .wLength = 1,
         .data = tmp
     };
-
+    ESP_LOGI(TAG, "HID Class Request Get Idle");
     HID_RETURN_ON_ERROR( hid_class_request_get(iface->parent, &get_proto, NULL),
                          "HID class request failure");
 
@@ -1485,7 +1649,7 @@ esp_err_t hid_class_request_set_report(hid_host_device_handle_t hid_dev_handle,
         .wLength = report_length,
         .data = report
     };
-
+    ESP_LOGI(TAG, "HID Class Request Set Report");
     return hid_class_request_set(iface->parent, &set_report);
 }
 
@@ -1504,7 +1668,7 @@ esp_err_t hid_class_request_set_idle(hid_host_device_handle_t hid_dev_handle,
         .wLength = 0,
         .data = NULL
     };
-
+    ESP_LOGI(TAG, "HID Class Request Set Idle");
     return hid_class_request_set(iface->parent, &set_idle);
 }
 
@@ -1522,6 +1686,6 @@ esp_err_t hid_class_request_set_protocol(hid_host_device_handle_t hid_dev_handle
         .wLength = 0,
         .data = NULL
     };
-
+    ESP_LOGI(TAG, "HID Class Request Set Protocol");
     return hid_class_request_set(iface->parent, &set_proto);
 }
