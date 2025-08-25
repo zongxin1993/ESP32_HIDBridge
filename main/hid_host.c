@@ -48,7 +48,7 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle, con
     switch (event) {
         case HID_HOST_INTERFACE_EVENT_INPUT_REPORT:
             ESP_ERROR_CHECK(hid_host_device_get_raw_input_report_data(hid_device_handle, data, 64, &data_length));
-            ble_send_char(data, data_length);
+            ble_send_keyword(data, data_length);
             break;
         case HID_HOST_INTERFACE_EVENT_DISCONNECTED:
             ESP_ERROR_CHECK(hid_host_device_close(hid_device_handle));
@@ -67,8 +67,9 @@ void hid_host_interface_callback(hid_host_device_handle_t hid_device_handle, con
  * @param[in] event              HID Host Device event
  * @param[in] arg                Pointer to arguments, does not used
  */
+hid_host_device_handle_t hid_device_handle;
 void hid_host_device_event(hid_event_queue_t* evt) {
-    hid_host_device_handle_t hid_device_handle = evt->hid_host_device.handle;
+    hid_device_handle = evt->hid_host_device.handle;
     hid_host_driver_event_t event = evt->hid_host_device.event;
     // void* arg = evt->hid_host_device.arg;
     hid_host_dev_params_t dev_params;
@@ -88,12 +89,6 @@ void hid_host_device_event(hid_event_queue_t* evt) {
             ESP_ERROR_CHECK(hid_host_device_start(hid_device_handle));
             memset(&hid_host_info, 0x0, sizeof(hid_host_dev_info_t));
             ESP_ERROR_CHECK(hid_host_get_device_info(hid_device_handle, &hid_host_info));
-
-            // printf("\t VID: 0x%04X\n", hid_host_info.VID);
-            // printf("\t PID: 0x%04X\n", hid_host_info.PID);
-            // wprintf(L"\t iManufacturer: %S \n", hid_host_info.iManufacturer);
-            // wprintf(L"\t iProduct: %S \n", hid_host_info.iProduct);
-            // wprintf(L"\t iSerialNumber: %S \n", hid_host_info.iSerialNumber);
             break;
         default:
             break;
@@ -164,11 +159,11 @@ static void gpio_isr_cb(void* arg) {
  * @param[in] event             HID Device event
  * @param[in] arg               Not used
  */
-void hid_host_device_callback(hid_host_device_handle_t hid_device_handle, const hid_host_driver_event_t event,
+void hid_host_device_callback(hid_host_device_handle_t hid_device_handle_t, const hid_host_driver_event_t event,
                               void* arg) {
     const hid_event_queue_t evt_queue = {.event_group = APP_EVENT_HID_HOST,
                                          // HID Host Device related info
-                                         .hid_host_device.handle = hid_device_handle,
+                                         .hid_host_device.handle = hid_device_handle_t,
                                          .hid_host_device.event = event,
                                          .hid_host_device.arg = arg};
 

@@ -12,6 +12,7 @@
 #include <freertos/FreeRTOS.h>
 
 #include "hid.h"
+#include "usb/usb_types_stack.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +58,9 @@ typedef struct {
     wchar_t iManufacturer[HID_STR_DESC_MAX_LENGTH];
     wchar_t iProduct[HID_STR_DESC_MAX_LENGTH];
     wchar_t iSerialNumber[HID_STR_DESC_MAX_LENGTH];
+    usb_device_info_t device_info;
+    const usb_device_desc_t *device_desc;
+    const usb_config_desc_t *config_desc;
 } hid_host_dev_info_t;
 
 /**
